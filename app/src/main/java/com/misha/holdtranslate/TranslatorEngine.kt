@@ -1,0 +1,131 @@
+package com.misha.holdtranslate
+
+import com.google.mlkit.common.model.DownloadConditions
+import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.nl.languageid.LanguageIdentification
+import com.google.mlkit.nl.languageid.LanguageIdentificationOptions
+import com.google.mlkit.nl.languageid.LanguageIdentifier
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.tasks.await
+
+internal data class TranslationBatch(
+    val items: List<ScreenText>,
+    val attempted: Int,
+    val failed: Int,
+)
+
+internal object TranslatorEngine {
+    private val translator: Translator by lazy {
+        val options = TranslatorOptions.Builder()
+            .setSourceLanguage(TranslateLanguage.GERMAN)
+            .setTargetLanguage(TranslateLanguage.ENGLISH)
+            .build()
+        Translation.getClient(options)
+    }
+
+    private val languageIdentifier: LanguageIdentifier by lazy {
+        LanguageIdentification.getClient(
+            LanguageIdentificationOptions.Builder()
+                .setConfidenceThreshold(0.01f)
+                .build(),
+        )
+    }
+
+    private val cache = java.util.concurrent.ConcurrentHashMap<String, String>()
+    private val germanCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
+    private val gate = Semaphore(5)
+
+    suspend fun isModelDownloaded(): Boolean {
+        val models = RemoteModelManager.getInstance()
+            .getDownloadedModels(TranslateRemoteModel::class.java)
+            .await()
+        val languages = models.map { it.language }.toSet()
+        return TranslateLanguage.GERMAN in languages && TranslateLanguage.ENGLISH in languages
+    }
+
+    suspend fun downloadModel() {
+        val conditions = DownloadConditions.Builder().build()
+        translator.downloadModelIfNeeded(conditions).await()
+    }
+
+    suspend fun translateAll(items: List<ScreenText>): TranslationBatch = coroutineScope {
+        if (items.isEmpty()) return@coroutineScope TranslationBatch(emptyList(), 0, 0)
+        val germanFlags = items.distinctBy { it.text }.map { item ->
+            async { item.text to isGerman(item.text) }
+        }.awaitAll()
+        val germanText = germanFlags.filter { it.second }.map { it.first }.toSet()
+        val germanItems = items.filter { it.text in germanText }
+        if (germanItems.isEmpty()) return@coroutineScope TranslationBatch(emptyList(), 0, 0)
+        val unique = germanItems.map { it.text }.distinct()
+        val translated = unique.map { text ->
+            async { text to translateOne(text) }
+        }.awaitAll()
+        var failed = 0
+        val byText = HashMap<String, String>(translated.size)
+        for ((source, result) in translated) {
+            if (result == null) {
+                failed += 1
+            } else {
+                byText[source] = result
+            }
+        }
+        val visible = germanItems.mapNotNull { item ->
+            val result = byText[item.text] ?: return@mapNotNull null
+            if (result.equals(item.text, ignoreCase = true)) null
+            else item.copy(text = result)
+        }
+        TranslationBatch(visible, unique.size, failed)
+    }
+
+    private suspend fun isGerman(text: String): Boolean {
+        germanCache[text]?.let { return it }
+        if (text.any { it in "äöüÄÖÜß" }) {
+            germanCache[text] = true
+            return true
+        }
+        val ranked = try {
+            languageIdentifier.identifyPossibleLanguages(text).await()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            return false
+        }
+        val german = ranked.firstOrNull { it.languageTag == "de" }?.confidence ?: 0f
+        val english = ranked.firstOrNull { it.languageTag == "en" }?.confidence ?: 0f
+        val result = german >= 0.5f && german >= english ||
+            german >= 0.34f && german > english + 0.1f
+        germanCache[text] = result
+        return result
+    }
+
+    private suspend fun translateOne(text: String): String? {
+        cache[text]?.let { return it }
+        val capped = if (text.length > 1500) text.take(1500) else text
+        return gate.withPermit {
+            cache[text]?.let { return@withPermit it }
+            try {
+                val result = translator.translate(capped).await().trim()
+                if (result.isEmpty()) {
+                    null
+                } else {
+                    cache[text] = result
+                    result
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
+}

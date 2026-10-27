@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Translate</string>
+    <string name="accessibility_description">Tap the EN button to translate the screen. Tap it again to remove the English. Drag the button to move it. Scroll inside a box to read the rest. Text is read only when you tap, stays on the device, and is not saved.</string>
+    <string name="intro_title">Translate</string>
+    <string name="language_lock">This screen stays in English.</string>
+    <string name="intro_body">An EN button stays on top of your other apps. Drag it to move it.\n\nTap it to cover the German on the screen with English. Scroll inside a box to read the rest. Tap the button again and the German is back.\n\nAndroid cannot change the words inside other apps. The English is drawn on top.</string>
+    <string name="status_accessibility_on">Accessibility: on</string>
+    <string name="status_accessibility_off">Accessibility: off</string>
+    <string name="status_model_on">Offline model: ready</string>
+    <string name="status_model_off">Offline model: not downloaded</string>
+    <string name="status_button_on">EN button: showing</string>
+    <string name="status_button_off">EN button: hidden</string>
+    <string name="status_button_waiting">EN button: allow display over other apps</string>
+    <string name="action_accessibility">Open accessibility settings</string>
+    <string name="action_app_info">Open app info</string>
+    <string name="action_download">Download German to English</string>
+    <string name="action_downloading">Downloading…</string>
+    <string name="action_overlay">Allow display over other apps</string>
+    <string name="action_hide">Hide the EN button</string>
+    <string name="action_show">Show the EN button</string>
+    <string name="help_overlay_first">Allow display over other apps. An orange EN button then stays on top of your other apps. Drag it to move it.</string>
+    <string name="help_accessibility">The EN button should now be on screen. Drag it to move it.\n\nTurn on accessibility so tapping that button can read the screen. If the switch is disabled, open app info, tap the three dots at the top, and allow restricted settings. Confirm with your fingerprint or face, then turn the switch on.</string>
+    <string name="help_download">About 30 MB, once. After this, translation stays on the phone. Wi-Fi is the better network. Words from other apps are not uploaded and are not saved.</string>
+    <string name="help_overlay">Android blocked the button. Allow Translate to display over other apps, then return here.</string>
+    <string name="help_ready">Tap the EN button to translate. Drag it to move it. Scroll inside a box to read the rest. Tap the button again to see the German.</string>
+    <string name="footnote">Pictures, many games, and some banking apps do not expose their words, so those stay in German. A normal label, message, or sentence can be translated. The button does not read the screen until you tap it.</string>
+    <string name="download_failed">The download failed. Check the connection and try again.</string>
+    <string name="error_need_accessibility">Turn on accessibility for Translate</string>
+    <string name="error_need_model">Download the model in Translate first</string>
+    <string name="error_no_text">No readable text on this screen</string>
+    <string name="error_no_german">No German to translate on this screen</string>
+    <string name="error_translate">Download the model in Translate again</string>
+    <string name="error_draw">Could not draw the translation</string>
+    <string name="cd_button">Tap to translate this screen into English. Drag to move the button. Tap again to clear.</string>
+    <string name="notification_channel">Translate</string>
+    <string name="notification_title">EN button is on</string>
+    <string name="notification_text">Tap the orange EN button to translate. Scroll a box to read the rest. Tap the button again to clear it.</string>
+</resources>
