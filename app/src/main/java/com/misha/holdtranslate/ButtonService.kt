@@ -4,12 +4,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.LayerDrawable
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -22,6 +24,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 internal enum class EnButtonState {
     IDLE,
@@ -30,12 +33,50 @@ internal enum class EnButtonState {
     ERROR,
 }
 
+internal fun enButtonTextSizeSp(label: String): Float {
+    return when {
+        label.length <= 2 -> 18f
+        label.length <= 4 -> 14f
+        else -> 11f
+    }
+}
+
+internal fun translateButtonBackground(context: Context, color: Int): LayerDrawable {
+    val circle = GradientDrawable().apply {
+        shape = GradientDrawable.OVAL
+        setColor(color)
+    }
+    val mark = ContextCompat.getDrawable(context, R.drawable.ic_launcher_foreground)!!.mutate()
+    return LayerDrawable(arrayOf(circle, mark))
+}
+
+internal fun paintTranslateButton(view: TextView, state: EnButtonState, color: Int, pageLabel: String?) {
+    val background = view.background as LayerDrawable
+    (background.getDrawable(0) as GradientDrawable).setColor(color)
+    val caption = when {
+        state == EnButtonState.WORKING -> "…"
+        state == EnButtonState.ERROR -> "!"
+        pageLabel != null -> pageLabel
+        else -> null
+    }
+    val mark = background.getDrawable(1)
+    if (caption == null) {
+        view.text = ""
+        mark.alpha = 255
+    } else {
+        view.text = caption
+        view.textSize = enButtonTextSizeSp(caption)
+        mark.alpha = 0
+    }
+    background.invalidateSelf()
+}
+
 internal object EnButtonEvents {
-    var onState: ((EnButtonState, String?) -> Unit)? = null
+    var onState: ((EnButtonState, String?, String?) -> Unit)? = null
     var onVisibility: (() -> Unit)? = null
 
-    fun publish(state: EnButtonState, message: String?) {
-        onState?.invoke(state, message)
+    fun publish(state: EnButtonState, message: String?, label: String? = null) {
+        onState?.invoke(state, message, label)
     }
 
     fun visibilityChanged() {
@@ -67,7 +108,7 @@ class ButtonService : Service() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        EnButtonEvents.onState = { state, message -> applyState(state, message) }
+        EnButtonEvents.onState = { state, message, label -> applyState(state, message, label) }
     }
 
     fun raise() {
@@ -175,7 +216,6 @@ class ButtonService : Service() {
     private fun buildButtonRow(): LinearLayout {
         val size = dp(64)
         val button = TextView(this).apply {
-            text = "EN"
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             textSize = 18f
@@ -184,7 +224,7 @@ class ButtonService : Service() {
             contentDescription = getString(R.string.cd_button)
             minimumWidth = size
             minimumHeight = size
-            background = circle(COLOR_IDLE)
+            background = translateButtonBackground(this@ButtonService, COLOR_IDLE)
             setOnTouchListener { _, event -> onButtonTouch(event) }
         }
         val message = TextView(this).apply {
@@ -222,18 +262,12 @@ class ButtonService : Service() {
             }
             MotionEvent.ACTION_MOVE -> {
                 if (mover.onMove(event, row, params)) {
-                    clearError?.let { handler.removeCallbacks(it) }
-                    clearError = null
-                    HoldTranslateService.instance?.cancelHold()
-                    applyState(EnButtonState.IDLE, null)
+                    HoldTranslateService.instance?.onButtonDragged()
                 }
             }
             MotionEvent.ACTION_UP -> {
                 if (mover.dragging) {
-                    clearError?.let { handler.removeCallbacks(it) }
-                    clearError = null
                     mover.save(params)
-                    applyState(EnButtonState.IDLE, null)
                 } else {
                     val service = HoldTranslateService.instance
                     if (service == null) {
@@ -247,40 +281,32 @@ class ButtonService : Service() {
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
-                if (mover.dragging) {
-                    clearError?.let { handler.removeCallbacks(it) }
-                    clearError = null
-                    mover.save(params)
-                    applyState(EnButtonState.IDLE, null)
-                }
+                if (mover.dragging) mover.save(params)
             }
         }
         return true
     }
 
-    private fun applyState(state: EnButtonState, message: String?) {
+    private fun applyState(state: EnButtonState, message: String?, label: String? = null) {
         val view = buttonView ?: return
-        val (label, color) = when (state) {
-            EnButtonState.IDLE -> "EN" to COLOR_IDLE
-            EnButtonState.WORKING -> "…" to COLOR_WORKING
-            EnButtonState.SHOWING -> "EN" to COLOR_SHOWING
-            EnButtonState.ERROR -> "!" to COLOR_ERROR
+        val color = when (state) {
+            EnButtonState.IDLE -> COLOR_IDLE
+            EnButtonState.WORKING -> COLOR_WORKING
+            EnButtonState.SHOWING -> COLOR_SHOWING
+            EnButtonState.ERROR -> COLOR_ERROR
         }
-        view.text = label
-        (view.background as GradientDrawable).setColor(color)
+        paintTranslateButton(view, state, color, label)
+        view.contentDescription = if (label == null) {
+            getString(R.string.cd_button)
+        } else {
+            getString(R.string.cd_button_page, label)
+        }
         if (message.isNullOrBlank()) {
             messageView?.visibility = android.view.View.GONE
             messageView?.text = ""
         } else {
             messageView?.text = message
             messageView?.visibility = android.view.View.VISIBLE
-        }
-    }
-
-    private fun circle(color: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
         }
     }
 

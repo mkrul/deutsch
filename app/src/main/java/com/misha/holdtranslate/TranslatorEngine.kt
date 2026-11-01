@@ -41,6 +41,16 @@ internal object TranslatorEngine {
         )
     }
 
+    private val germanParts = arrayOf(
+        "anruf", "schirm", "stellung", "meldung", "nachricht", "speicher",
+        "tastatur", "passwort", "verlauf", "einstell", "datenschutz", "standort",
+        "netzwerk", "flugmodus", "benachrichtig", "zustand", "ordner", "datei",
+        "freigabe", "wecker", "kalender", "lautlos", "zwischenablage", "ruhemodus",
+        "anzeige", "seite",
+    )
+    private val germanEndings = arrayOf(
+        "ung", "keit", "heit", "schaft", "chen", "lein", "nis", "tum", "lich", "isch",
+    )
     private val cache = java.util.concurrent.ConcurrentHashMap<String, String>()
     private val germanCache = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     private val gate = Semaphore(5)
@@ -89,23 +99,37 @@ internal object TranslatorEngine {
 
     private suspend fun isGerman(text: String): Boolean {
         germanCache[text]?.let { return it }
-        if (text.any { it in "äöüÄÖÜß" }) {
+        val normal = java.text.Normalizer.normalize(text, java.text.Normalizer.Form.NFC)
+        if (hasGermanSignal(normal)) {
             germanCache[text] = true
             return true
         }
         val ranked = try {
-            languageIdentifier.identifyPossibleLanguages(text).await()
+            languageIdentifier.identifyPossibleLanguages(normal).await()
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
-            return false
+            return true
         }
         val german = ranked.firstOrNull { it.languageTag == "de" }?.confidence ?: 0f
         val english = ranked.firstOrNull { it.languageTag == "en" }?.confidence ?: 0f
-        val result = german >= 0.5f && german >= english ||
-            german >= 0.34f && german > english + 0.1f
+        val singleToken = normal.none { it.isWhitespace() } && normal.count { it.isLetter() } >= 6
+        val result = if (singleToken) {
+            english < 0.98f || german >= 0.02f
+        } else {
+            english < 0.85f || english < german + 0.35f
+        }
         germanCache[text] = result
         return result
+    }
+
+    private fun hasGermanSignal(text: String): Boolean {
+        if (text.any { it in "äöüÄÖÜß" }) return true
+        val lower = text.lowercase()
+        if (germanParts.any { lower.contains(it) }) return true
+        val letters = lower.filter { it.isLetter() }
+        if (letters.length < 8) return false
+        return germanEndings.any { letters.endsWith(it) }
     }
 
     private suspend fun translateOne(text: String): String? {

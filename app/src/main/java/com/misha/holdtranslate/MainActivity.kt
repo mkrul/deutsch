@@ -12,6 +12,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.widget.doAfterTextChanged
 import androidx.lifecycle.lifecycleScope
 import com.misha.holdtranslate.databinding.ActivityMainBinding
 import kotlinx.coroutines.CancellationException
@@ -51,6 +52,10 @@ class MainActivity : AppCompatActivity() {
         }
         binding.primaryButton.setOnClickListener { onPrimary() }
         binding.secondaryButton.setOnClickListener { onSecondary() }
+        binding.apiKey.setText(Prefs.apiKey(this))
+        binding.apiKey.doAfterTextChanged {
+            Prefs.setApiKey(this, it?.toString().orEmpty())
+        }
     }
 
     override fun onResume() {

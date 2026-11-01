@@ -6,6 +6,10 @@ import android.content.Intent
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.os.Looper
 import android.provider.Settings
 import android.text.InputType
@@ -20,6 +24,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import android.graphics.Color
 import android.graphics.Typeface
 import androidx.core.content.ContextCompat
@@ -30,10 +35,17 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 class HoldTranslateService : AccessibilityService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var speechJob: Job? = null
+    private var speakingView: TextView? = null
+    private var player: MediaPlayer? = null
+    private var audioFocus: AudioFocusRequest? = null
     private val windowManager: WindowManager
         get() = getSystemService(WindowManager::class.java)
 
@@ -49,6 +61,9 @@ class HoldTranslateService : AccessibilityService() {
     private var holdGeneration = 0
     private var buttonState = EnButtonState.IDLE
     private var overlayOpen = false
+    private var translationPages: List<List<PlacedTranslation>> = emptyList()
+    private var pageIndex = 0
+    private var openChip: TranslationChip? = null
     private var visited = 0
 
     override fun onServiceConnected() {
@@ -66,11 +81,24 @@ class HoldTranslateService : AccessibilityService() {
     }
 
     fun onTap() {
-        if (overlayOpen || buttonState == EnButtonState.WORKING) {
+        if (buttonState == EnButtonState.WORKING) {
             endHold()
             return
         }
+        if (overlayOpen) {
+            if (pageIndex + 1 < translationPages.size) {
+                showPage(pageIndex + 1)
+            } else {
+                endHold()
+            }
+            return
+        }
         startHold()
+    }
+
+    fun onButtonDragged() {
+        if (overlayOpen) return
+        cancelHold()
     }
 
     fun cancelHold() {
@@ -198,7 +226,6 @@ class HoldTranslateService : AccessibilityService() {
     private fun buildButtonRow(): LinearLayout {
         val size = dp(64)
         val button = TextView(this).apply {
-            text = "EN"
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             textSize = 18f
@@ -207,7 +234,7 @@ class HoldTranslateService : AccessibilityService() {
             contentDescription = getString(R.string.cd_button)
             isHapticFeedbackEnabled = true
             isClickable = true
-            background = circle(COLOR_IDLE)
+            background = translateButtonBackground(this@HoldTranslateService, COLOR_IDLE)
             layoutParams = LinearLayout.LayoutParams(size, size)
             setOnTouchListener { _, event -> onButtonTouch(event) }
         }
@@ -244,7 +271,7 @@ class HoldTranslateService : AccessibilityService() {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> mover.down(params, event)
             MotionEvent.ACTION_MOVE -> {
-                if (mover.onMove(event, row, params)) cancelHold()
+                if (mover.onMove(event, row, params)) onButtonDragged()
             }
             MotionEvent.ACTION_UP -> {
                 if (mover.dragging) mover.save(params) else onTap()
@@ -298,10 +325,18 @@ class HoldTranslateService : AccessibilityService() {
                 showError(getString(R.string.error_no_german))
                 return@launch
             }
-            revealOverlay(batch.items)
-            if (buttonState == EnButtonState.ERROR) return@launch
-            setButtonState(EnButtonState.SHOWING)
-            buttonView?.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            val pages = TranslationPages.layout(
+                this@HoldTranslateService,
+                batch.items,
+                windowManager.currentWindowMetrics.bounds,
+            )
+            if (generation != holdGeneration) return@launch
+            if (pages.isEmpty()) {
+                showError(getString(R.string.error_draw))
+                return@launch
+            }
+            translationPages = pages
+            showPage(0)
         }
     }
 
@@ -324,48 +359,167 @@ class HoldTranslateService : AccessibilityService() {
         }
     }
 
-    private fun revealOverlay(items: List<ScreenText>) {
+    private fun showPage(index: Int) {
+        val page = translationPages.getOrNull(index) ?: return
+        stopSpeech()
+        openChip = null
         removeChips()
-        val screen = windowManager.currentWindowMetrics.bounds
-        val sorted = items.sortedWith(compareBy({ it.bounds.top }, { it.bounds.left }))
-        for (index in sorted.indices) {
-            val block = sorted[index]
-            val frame = TranslationChips.frame(this, block, sorted, index, screen) ?: continue
-            val chip = TranslationChips.create(this, block.text, frame.width(), frame.height())
+        pageIndex = index
+        for (placed in page) {
+            val chip = TranslationChips.create(
+                this,
+                placed.block.text,
+                placed.textWidth,
+                placed.window.height(),
+                { view -> speak(placed.block.source, view) },
+            ) { changed, open ->
+                onChipToggled(changed, placed, open)
+            }
             val params = WindowManager.LayoutParams(
-                frame.width(),
-                frame.height(),
+                placed.collapsedWidth,
+                placed.collapsedHeight,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.LEFT
-                x = frame.left
-                y = frame.top
+                x = placed.window.left
+                y = placed.window.top
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
             }
             try {
-                windowManager.addView(chip, params)
-                chipWindows.add(chip)
+                windowManager.addView(chip.view, params)
+                chipWindows.add(chip.view)
             } catch (e: Exception) {
                 Log.e(TAG, "chip add failed: ${e.javaClass.simpleName}: ${e.message}")
             }
         }
         if (chipWindows.isEmpty()) {
+            translationPages = emptyList()
+            pageIndex = 0
+            overlayOpen = false
             showError(getString(R.string.error_draw))
             return
         }
         overlayOpen = true
-        if (buttonState != EnButtonState.ERROR) setButtonState(EnButtonState.SHOWING)
+        if (buttonState != EnButtonState.ERROR) setButtonState(EnButtonState.SHOWING, pageLabel())
+        raiseButton()
+        ButtonService.instance?.raise()
+        buttonView?.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+    }
+
+    private fun onChipToggled(chip: TranslationChip, placed: PlacedTranslation, open: Boolean) {
+        if (open) {
+            val previous = openChip
+            openChip = chip
+            if (previous != null && previous !== chip) previous.setOpen(false)
+        } else if (openChip === chip) {
+            openChip = null
+        }
+        val params = chip.view.layoutParams as? WindowManager.LayoutParams ?: return
+        params.width = if (open) placed.window.width() else placed.collapsedWidth
+        params.height = if (open) placed.window.height() else placed.collapsedHeight
+        try {
+            windowManager.updateViewLayout(chip.view, params)
+        } catch (e: Exception) {
+            Log.e(TAG, "chip resize failed: ${e.javaClass.simpleName}: ${e.message}")
+        }
         raiseButton()
         ButtonService.instance?.raise()
     }
 
+    private fun pageLabel(): String? {
+        val count = translationPages.size
+        if (count <= 1) return null
+        return "${pageIndex + 1}/$count"
+    }
+
     private fun concealOverlay() {
+        stopSpeech()
         overlayOpen = false
+        translationPages = emptyList()
+        pageIndex = 0
+        openChip = null
         removeChips()
+    }
+
+    private fun speak(german: String, speaker: TextView) {
+        if (german.isBlank()) return
+        speakingView?.text = getString(R.string.speaker)
+        speakingView = speaker
+        speechJob?.cancel()
+        releasePlayer()
+        speaker.text = getString(R.string.speaker_working)
+        speechJob = scope.launch {
+            val bytes = try {
+                withContext(Dispatchers.IO) { GermanSpeech.audio(this@HoldTranslateService, german) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: SpeechException) {
+                if (speakingView === speaker) {
+                    speaker.text = getString(R.string.speaker)
+                    speakingView = null
+                }
+                val message = when (e.kind) {
+                    SpeechException.Kind.MISSING_KEY -> R.string.error_speech_key
+                    SpeechException.Kind.REJECTED -> R.string.error_speech_rejected
+                    SpeechException.Kind.FAILED -> R.string.error_speech
+                }
+                Toast.makeText(this@HoldTranslateService, message, Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            if (!isActive || speakingView !== speaker) return@launch
+            speaker.text = getString(R.string.speaker)
+            play(bytes)
+        }
+    }
+
+    private fun play(bytes: ByteArray) {
+        releasePlayer()
+        try {
+            val file = File(cacheDir, "german-speech.mp3")
+            file.writeBytes(bytes)
+            val attributes = AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+            val next = MediaPlayer()
+            next.setAudioAttributes(attributes)
+            next.setDataSource(file.absolutePath)
+            next.setOnCompletionListener {
+                if (player === next) releasePlayer()
+            }
+            next.prepare()
+            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                .setAudioAttributes(attributes)
+                .build()
+            getSystemService(AudioManager::class.java).requestAudioFocus(request)
+            audioFocus = request
+            next.start()
+            player = next
+        } catch (e: Exception) {
+            Log.e(TAG, "speech play failed: ${e.javaClass.simpleName}")
+            releasePlayer()
+            Toast.makeText(this, R.string.error_speech, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun stopSpeech() {
+        speechJob?.cancel()
+        speechJob = null
+        speakingView?.text = getString(R.string.speaker)
+        speakingView = null
+        releasePlayer()
+    }
+
+    private fun releasePlayer() {
+        player?.release()
+        player = null
+        val request = audioFocus ?: return
+        audioFocus = null
+        getSystemService(AudioManager::class.java).abandonAudioFocusRequest(request)
     }
 
     private fun removeChips() {
@@ -396,8 +550,8 @@ class HoldTranslateService : AccessibilityService() {
         buttonState = EnButtonState.ERROR
         EnButtonEvents.publish(EnButtonState.ERROR, message)
         val view = buttonView ?: return
-        view.text = "!"
-        (view.background as GradientDrawable).setColor(COLOR_ERROR)
+        paintTranslateButton(view, EnButtonState.ERROR, COLOR_ERROR, null)
+        view.contentDescription = getString(R.string.cd_button)
         messageView?.text = message
         messageView?.visibility = View.VISIBLE
     }
@@ -407,24 +561,21 @@ class HoldTranslateService : AccessibilityService() {
         messageView?.text = ""
     }
 
-    private fun setButtonState(state: EnButtonState) {
+    private fun setButtonState(state: EnButtonState, label: String? = null) {
         buttonState = state
-        EnButtonEvents.publish(state, null)
+        EnButtonEvents.publish(state, null, label)
         val view = buttonView ?: return
-        val (label, color) = when (state) {
-            EnButtonState.IDLE -> "EN" to COLOR_IDLE
-            EnButtonState.WORKING -> "…" to COLOR_WORKING
-            EnButtonState.SHOWING -> "EN" to COLOR_SHOWING
-            EnButtonState.ERROR -> "!" to COLOR_ERROR
+        val color = when (state) {
+            EnButtonState.IDLE -> COLOR_IDLE
+            EnButtonState.WORKING -> COLOR_WORKING
+            EnButtonState.SHOWING -> COLOR_SHOWING
+            EnButtonState.ERROR -> COLOR_ERROR
         }
-        view.text = label
-        (view.background as GradientDrawable).setColor(color)
-    }
-
-    private fun circle(color: Int): GradientDrawable {
-        return GradientDrawable().apply {
-            shape = GradientDrawable.OVAL
-            setColor(color)
+        paintTranslateButton(view, state, color, label)
+        view.contentDescription = if (label == null) {
+            getString(R.string.cd_button)
+        } else {
+            getString(R.string.cd_button_page, label)
         }
     }
 

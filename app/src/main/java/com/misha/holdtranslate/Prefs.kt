@@ -8,6 +8,7 @@ internal object Prefs {
     private const val MODEL_READY = "model_ready"
     private const val BUTTON_X = "button_x"
     private const val BUTTON_Y = "button_y"
+    private const val API_KEY = "elevenlabs_api_key"
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
@@ -32,5 +33,11 @@ internal object Prefs {
 
     fun setButtonPosition(context: Context, x: Int, y: Int) {
         prefs(context).edit().putInt(BUTTON_X, x).putInt(BUTTON_Y, y).apply()
+    }
+
+    fun apiKey(context: Context): String = prefs(context).getString(API_KEY, "").orEmpty()
+
+    fun setApiKey(context: Context, key: String) {
+        prefs(context).edit().putString(API_KEY, key.trim()).apply()
     }
 }

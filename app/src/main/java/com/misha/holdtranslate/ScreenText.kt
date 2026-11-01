@@ -8,6 +8,7 @@ import kotlin.math.min
 internal data class ScreenText(
     val text: String,
     val bounds: Rect,
+    val source: String = text,
 )
 
 private val whitespace = Regex("\\s+")
